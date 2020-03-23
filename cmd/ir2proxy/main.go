@@ -2,9 +2,8 @@ package main
 
 import (
 	"bytes"
-	"fmt"
-	"io/ioutil"
-	"os"
+	"html/template"
+	"net/http"
 	"strings"
 
 	"github.com/ghodss/yaml"
@@ -13,72 +12,7 @@ import (
 	"github.com/projectcontour/ir2proxy/internal/translator"
 	"github.com/projectcontour/ir2proxy/internal/validate"
 	"github.com/sirupsen/logrus"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
-
-var build = "devel"
-
-func main() {
-
-	exitcode := run()
-	os.Exit(exitcode)
-
-}
-
-func run() int {
-
-	log := logrus.StandardLogger()
-	app := kingpin.New("ir2proxy", "Contour IngressRoute to HTTPProxy conversion tool.")
-	app.Version(build)
-	yamlfile := app.Arg("yaml", "YAML file to parse for IngressRoute objects").Required().ExistingFile()
-
-	args := os.Args[1:]
-	kingpin.MustParse(app.Parse(args))
-
-	data, err := ioutil.ReadFile(*yamlfile)
-	if err != nil {
-		log.Error(err)
-	}
-
-	for _, yamldoc := range splitYAML(data) {
-		ir, err := k8sdecoder.DecodeIngressRoute(yamldoc)
-		if err != nil {
-			log.Error(err)
-			return 1
-		}
-
-		validationErrors := validate.CheckIngressRoute(ir)
-		if len(validationErrors) > 0 {
-			for _, validationError := range validationErrors {
-				log.Error(validationError)
-			}
-			return 1
-		}
-
-		hp, warnings, err := translator.IngressRouteToHTTPProxy(ir)
-		if err != nil {
-			log.Error(err)
-			return 1
-		}
-		for _, warning := range warnings {
-			log.Warn(warning)
-		}
-
-		outputYAML, err := yaml.Marshal(hp)
-		if err != nil {
-			log.Warn(err)
-			return 1
-		}
-		// The Kubernetes standard header field `currentTimestamp` serializes weirdly,
-		// so filter it out.
-		// See https://github.com/projectcontour/ir2proxy/issues/8 for more explanation here.
-		outputYAML = bytes.ReplaceAll(outputYAML, []byte("  creationTimestamp: null\n"), []byte(""))
-		outputWarnings := commentedWarnings(warnings)
-		fmt.Printf("---\n%s%s", outputWarnings, outputYAML)
-	}
-
-	return 0
-}
 
 func commentedWarnings(warnings []string) string {
 	for index, warning := range warnings {
@@ -88,15 +22,120 @@ func commentedWarnings(warnings []string) string {
 
 }
 
-func splitYAML(yamldata []byte) [][]byte {
+func processInput(w http.ResponseWriter, req *http.Request) {
 
-	var yamldocs [][]byte
-	for _, yamldoc := range bytes.Split(yamldata, []byte("---")) {
-		if len(yamldoc) == 0 {
-			continue
-		}
-		yamldocs = append(yamldocs, yamldoc)
+	log := logrus.StandardLogger()
+	var output string
+	var outputWarnings string
+	var outputYAML []byte
+
+	tmpl := template.Must(template.ParseFiles("forms.html"))
+
+	if req.Method != http.MethodPost {
+		tmpl.Execute(w, nil)
+		return
 	}
-	return yamldocs
+
+	input := req.FormValue("input")
+	log.Println("##### FROM form: " + input)
+
+	ir, err := k8sdecoder.DecodeIngressRoute([]byte(input))
+	if err != nil {
+		log.Error(err)
+		log.Printf("Error from k8sdecoder.DecodeIngressRoute(input)")
+		output = err.Error()
+		if err := tmpl.Execute(
+			w,
+			map[string]interface{}{
+				"input":  input,
+				"output": output,
+			}); err != nil {
+			log.Println("Error executing", err)
+		}
+		return
+	}
+
+	validationErrors := validate.CheckIngressRoute(ir)
+	if len(validationErrors) > 0 {
+		for _, validationError := range validationErrors {
+			log.Error(validationError)
+			log.Printf("Error from validate.CheckIngressRoute(ir)")
+			output += err.Error()
+			if err := tmpl.Execute(
+				w,
+				map[string]interface{}{
+					"input":  input,
+					"output": output,
+				}); err != nil {
+				log.Println("Error executing", err)
+			}
+		}
+		return
+	}
+
+	hp, warnings, err := translator.IngressRouteToHTTPProxy(ir)
+	if err != nil {
+		log.Error(err)
+		log.Printf("Error from translator.IngressRouteToHTTPProxy(ir)")
+		output = err.Error()
+		if err := tmpl.Execute(
+			w,
+			map[string]interface{}{
+				"input":  input,
+				"output": output,
+			}); err != nil {
+			log.Println("Error executing", err)
+		}
+		return
+	}
+
+	for _, warning := range warnings {
+		log.Warn(warning)
+	}
+
+	outputYAML, err = yaml.Marshal(hp)
+	if err != nil {
+		log.Warn(err)
+		log.Printf("Error from yaml.Marshal(hp)")
+		output = err.Error()
+		if err := tmpl.Execute(
+			w,
+			map[string]interface{}{
+				"input":  input,
+				"output": output,
+			}); err != nil {
+			log.Println("Error executing", err)
+		}
+		return
+	}
+
+	// The Kubernetes standard header field `currentTimestamp` serializes weirdly,
+	// so filter it out.
+	// See https://github.com/projectcontour/ir2proxy/issues/8 for more explanation here.
+	outputYAML = bytes.ReplaceAll(outputYAML, []byte("  creationTimestamp: null\n"), []byte(""))
+	outputYAML = bytes.ReplaceAll(outputYAML, []byte("status: {}"), []byte(""))
+	outputWarnings = commentedWarnings(warnings)
+	// fmt.Printf("---\n%s%s", outputWarnings, outputYAML)
+	output = string(outputWarnings) + string(outputYAML)
+
+	log.Println("### PRE template: " + output)
+
+	if err := tmpl.Execute(
+		w,
+		map[string]interface{}{
+			"input":  input,
+			"output": output,
+		}); err != nil {
+		log.Println("Error executing", err)
+	}
+
+	log.Println("### POST template: " + output)
+
+}
+
+func main() {
+
+	http.HandleFunc("/", processInput)
+	http.ListenAndServe(":8080", nil)
 
 }
