@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+
+<head>
+
+    <meta charset=utf-8>
+    <title>IngressRoute to HTTPProxy converter</title>
+    <style>
+        table { border: 1px dotted; }
+        textarea { height: 800px; width: 800px; }
+        td { vertical-align: top; }
+    </style>
+
+</head>
+
+<body>
+    <h1>IngressRoute to HTTPProxy converter</h1>
+    <table>
+        <tr>
+            <td>
+                <form method=POST>
+                    <label>IngressRoute:</label><br />
+                    <textarea name=input>{{ .input }}</textarea><br />
+                    <input type=submit>
+                </form>
+            </td>
+            <td>
+                <label>HTTPProxy:</label><br />
+                <textarea name=output>{{ .output }}</textarea>
+            </td>
+        </tr>
+    </table>
+</body>
